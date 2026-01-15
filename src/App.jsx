@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Home, Apple, TrendingUp, Loader } from 'lucide-react';
+import { Home, Apple, TrendingUp, Loader, Barcode } from 'lucide-react';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 
 const GEMINI_API_KEY = import.meta.env.VITE_GEMINI_API_KEY;
@@ -22,7 +22,11 @@ export default function App() {
   const [showFoodScanner, setShowFoodScanner] = useState(false);
   const [aiLoading, setAiLoading] = useState(false);
   const [aiError, setAiError] = useState('');
+  const [showBarcodeScanner, setShowBarcodeScanner] = useState(false);
+  const [barcodeLoading, setBarcodeLoading] = useState(false);
+  const [barcodeError, setBarcodeError] = useState('');
   const fileInputRef = useRef(null);
+  const videoRef = useRef(null);
 
   const today = new Date();
   const dayOfWeek = today.getDay();
@@ -147,16 +151,26 @@ export default function App() {
     try {
       const reader = new FileReader();
       reader.onload = async (e) => {
-        const base64Image = e.target?.result?.split(',')[1];
-        if (!base64Image) {
-          setAiError('Failed to read image');
-          setAiLoading(false);
-          return;
-        }
-
         try {
+          const base64Image = e.target?.result?.split(',')[1];
+          if (!base64Image) {
+            setAiError('Failed to read image');
+            setAiLoading(false);
+            return;
+          }
+
+          if (!GEMINI_API_KEY || GEMINI_API_KEY === 'undefined') {
+            setAiError('❌ API key not configured. Check .env.local file.');
+            setAiLoading(false);
+            return;
+          }
+
+          console.log('API Key loaded:', GEMINI_API_KEY.substring(0, 20) + '...');
+
           const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
           const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
+
+          console.log('Sending request to Gemini API...');
 
           const response = await model.generateContent([
             {
@@ -165,40 +179,91 @@ export default function App() {
                 data: base64Image,
               },
             },
-            'Analyze this meal photo and provide nutritional information. Extract: 1) Meal name, 2) Estimated calories, 3) Estimated protein in grams. Respond in JSON format only like this: {"name": "meal name", "calories": number, "protein": number}. Be realistic with portions shown.',
+            {
+              text: 'Analyze this meal photo. Extract: 1) Meal name, 2) Estimated calories, 3) Estimated protein in grams. Respond ONLY with valid JSON: {"name": "meal name", "calories": 600, "protein": 30}. Do not include any other text.'
+            }
           ]);
 
-          const text = response.response.text();
-          const jsonMatch = text.match(/\{[\s\S]*\}/);
-    
-          if (!jsonMatch) {
-            setAiError('Could not parse meal data');
-            setAiLoading(false);
-            return;
-          }
-
-          const mealData = JSON.parse(jsonMatch[0]);
+          const text = response.response.text().trim();
+          console.log('API Response:', text);
           
-          if (mealData.name && mealData.calories && mealData.protein) {
+          let mealData;
+          try {
+            mealData = JSON.parse(text);
+          } catch {
+            const jsonMatch = text.match(/\{[\s\S]*\}/);
+            if (!jsonMatch) {
+              setAiError('❌ Invalid response from AI. Try another photo.');
+              setAiLoading(false);
+              return;
+            }
+            mealData = JSON.parse(jsonMatch[0]);
+          }
+          
+          if (mealData.name && typeof mealData.calories === 'number' && typeof mealData.protein === 'number') {
             handleAddMeal({
               name: mealData.name,
               calories: Math.round(mealData.calories),
               protein: Math.round(mealData.protein)
             });
           } else {
-            setAiError('Invalid meal data received');
+            setAiError('❌ Invalid meal data received');
           }
-        } catch (apiError) {
-          console.error('Gemini API error:', apiError);
-          setAiError('Failed to analyze meal. Check your API key or try again.');
+        } catch (err) {
+          console.error('Full error:', err);
+          setAiError(`❌ Error: ${err.message || 'Failed to analyze meal'}`);
         }
         setAiLoading(false);
       };
       reader.readAsDataURL(file);
     } catch (err) {
-      setAiError('Error processing image');
+      setAiError('❌ Error processing image');
       setAiLoading(false);
     }
+  };
+
+  const handleBarcodeLookup = async (barcode) => {
+    setBarcodeLoading(true);
+    setBarcodeError('');
+
+    try {
+      const response = await fetch(`https://world.openfoodfacts.org/api/v0/product/${barcode}.json`);
+      const data = await response.json();
+
+      if (data.status === 0) {
+        setBarcodeError('Product not found. Try another barcode.');
+        setBarcodeLoading(false);
+        return;
+      }
+
+      const product = data.product;
+      let calories = 0;
+      let protein = 0;
+      let name = product.product_name || 'Unknown Product';
+
+      if (product.nutriments) {
+        // Calculate calories from macros if available
+        const carbs = product.nutriments['carbohydrates_100g'] || 0;
+        const fat = product.nutriments['fat_100g'] || 0;
+        protein = Math.round(product.nutriments['proteins_100g'] || 0);
+        calories = Math.round((carbs * 4 + fat * 9 + protein * 4) || product.nutriments['energy-kcal_100g'] || 0);
+      }
+
+      if (calories > 0 && protein > 0) {
+        handleAddMeal({
+          name: name,
+          calories: calories,
+          protein: protein
+        });
+      } else {
+        setBarcodeError('Incomplete nutritional data for this product');
+      }
+    } catch (err) {
+      console.error('Error:', err);
+      setBarcodeError('Failed to look up barcode. Check internet connection.');
+    }
+    setBarcodeLoading(false);
+    setShowBarcodeScanner(false);
   };
 
   const caloriePercent = Math.min((nutrition.calories / 2200) * 100, 100);
@@ -371,6 +436,18 @@ export default function App() {
                 )}
               </button>
 
+              {/* Barcode Scan Button */}
+              <button onClick={() => setShowBarcodeScanner(!showBarcodeScanner)} className="w-full py-4 bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-700 hover:to-purple-700 text-white rounded-2xl font-medium text-sm tracking-wide shadow-xl hover:shadow-2xl transition-all duration-300 transform hover:scale-[1.02] active:scale-95 disabled:opacity-50" disabled={barcodeLoading}>
+                {barcodeLoading ? (
+                  <div className="flex items-center justify-center gap-2">
+                    <Loader size={16} className="animate-spin" />
+                    Scanning...
+                  </div>
+                ) : (
+                  '📦 Scan Barcode'
+                )}
+              </button>
+
               {/* Hidden File Input */}
               <input
                 type="file"
@@ -429,6 +506,67 @@ export default function App() {
                       ))}
                     </div>
                     <button onClick={() => setShowFoodScanner(false)} className="w-full py-2 text-gray-600 font-medium text-sm hover:text-gray-900 transition">
+                      Close
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* Barcode Scanner Modal */}
+              {showBarcodeScanner && (
+                <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-end p-4 justify-center">
+                  <div className="w-full max-w-md bg-white rounded-3xl p-6 shadow-2xl animate-in slide-in-from-bottom duration-300">
+                    <div className="mb-4">
+                      <h3 className="text-lg font-light text-gray-900">Scan Product Barcode</h3>
+                    </div>
+
+                    <div className="space-y-4 mb-4">
+                      <div className="p-4 bg-blue-50 border border-blue-200 rounded-2xl">
+                        <p className="text-xs text-blue-700 font-medium mb-3">Enter barcode or UPC number</p>
+                        <input
+                          type="text"
+                          id="barcodeInput"
+                          placeholder="Enter barcode..."
+                          className="w-full px-4 py-3 border border-blue-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-400 mb-3"
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') {
+                              const barcode = e.target.value.trim();
+                              if (barcode) {
+                                handleBarcodeLookup(barcode);
+                                e.target.value = '';
+                              }
+                            }
+                          }}
+                        />
+                        <button
+                          onClick={() => {
+                            const input = document.getElementById('barcodeInput');
+                            const barcode = input?.value.trim();
+                            if (barcode) {
+                              handleBarcodeLookup(barcode);
+                              input.value = '';
+                            }
+                          }}
+                          disabled={barcodeLoading}
+                          className="w-full py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium text-sm transition disabled:opacity-50"
+                        >
+                          {barcodeLoading ? 'Looking up...' : 'Lookup'}
+                        </button>
+                      </div>
+
+                      {barcodeError && (
+                        <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 text-xs">
+                          {barcodeError}
+                        </div>
+                      )}
+
+                      <div className="text-center text-xs text-gray-500">
+                        <p className="mb-2">✨ Works with most packaged foods worldwide</p>
+                        <p className="text-gray-400">Uses Open Food Facts database</p>
+                      </div>
+                    </div>
+
+                    <button onClick={() => setShowBarcodeScanner(false)} className="w-full py-2 text-gray-600 font-medium text-sm hover:text-gray-900 transition">
                       Close
                     </button>
                   </div>
