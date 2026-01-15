@@ -1,6 +1,8 @@
-import React, { useState, useEffect } from 'react';
-import { Home, Apple, TrendingUp } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import { Home, Apple, TrendingUp, Loader } from 'lucide-react';
+import { GoogleGenerativeAI } from '@google/generative-ai';
 
+const GEMINI_API_KEY = import.meta.env.VITE_GEMINI_API_KEY;
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('home');
@@ -18,6 +20,9 @@ export default function App() {
   });
   const [weightInput, setWeightInput] = useState('');
   const [showFoodScanner, setShowFoodScanner] = useState(false);
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiError, setAiError] = useState('');
+  const fileInputRef = useRef(null);
 
   const today = new Date();
   const dayOfWeek = today.getDay();
@@ -130,6 +135,70 @@ export default function App() {
   const handleResetNutrition = () => {
     setNutrition({ calories: 0, protein: 0, meals: [] });
     localStorage.setItem('nutrition', JSON.stringify({ calories: 0, protein: 0, meals: [] }));
+  };
+
+  const handleImageUpload = async (event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    setAiLoading(true);
+    setAiError('');
+
+    try {
+      const reader = new FileReader();
+      reader.onload = async (e) => {
+        const base64Image = e.target?.result?.split(',')[1];
+        if (!base64Image) {
+          setAiError('Failed to read image');
+          setAiLoading(false);
+          return;
+        }
+
+        try {
+          const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
+          const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
+
+          const response = await model.generateContent([
+            {
+              inlineData: {
+                mimeType: file.type,
+                data: base64Image,
+              },
+            },
+            'Analyze this meal photo and provide nutritional information. Extract: 1) Meal name, 2) Estimated calories, 3) Estimated protein in grams. Respond in JSON format only like this: {"name": "meal name", "calories": number, "protein": number}. Be realistic with portions shown.',
+          ]);
+
+          const text = response.response.text();
+          const jsonMatch = text.match(/\{[\s\S]*\}/);
+    
+          if (!jsonMatch) {
+            setAiError('Could not parse meal data');
+            setAiLoading(false);
+            return;
+          }
+
+          const mealData = JSON.parse(jsonMatch[0]);
+          
+          if (mealData.name && mealData.calories && mealData.protein) {
+            handleAddMeal({
+              name: mealData.name,
+              calories: Math.round(mealData.calories),
+              protein: Math.round(mealData.protein)
+            });
+          } else {
+            setAiError('Invalid meal data received');
+          }
+        } catch (apiError) {
+          console.error('Gemini API error:', apiError);
+          setAiError('Failed to analyze meal. Check your API key or try again.');
+        }
+        setAiLoading(false);
+      };
+      reader.readAsDataURL(file);
+    } catch (err) {
+      setAiError('Error processing image');
+      setAiLoading(false);
+    }
   };
 
   const caloriePercent = Math.min((nutrition.calories / 2200) * 100, 100);
@@ -291,9 +360,25 @@ export default function App() {
               </div>
 
               {/* Scan Button */}
-              <button onClick={() => setShowFoodScanner(!showFoodScanner)} className="w-full py-4 bg-gradient-to-r from-gray-900 to-gray-800 hover:from-gray-950 hover:to-gray-900 text-white rounded-2xl font-medium text-sm tracking-wide shadow-xl hover:shadow-2xl transition-all duration-300 transform hover:scale-[1.02] active:scale-95">
-                + Scan Meal
+              <button onClick={() => setShowFoodScanner(!showFoodScanner)} className="w-full py-4 bg-gradient-to-r from-gray-900 to-gray-800 hover:from-gray-950 hover:to-gray-900 text-white rounded-2xl font-medium text-sm tracking-wide shadow-xl hover:shadow-2xl transition-all duration-300 transform hover:scale-[1.02] active:scale-95 disabled:opacity-50" disabled={aiLoading}>
+                {aiLoading ? (
+                  <div className="flex items-center justify-center gap-2">
+                    <Loader size={16} className="animate-spin" />
+                    Analyzing...
+                  </div>
+                ) : (
+                  '+ Scan Meal with AI'
+                )}
               </button>
+
+              {/* Hidden File Input */}
+              <input
+                type="file"
+                ref={fileInputRef}
+                onChange={handleImageUpload}
+                accept="image/*"
+                className="hidden"
+              />
 
               {/* Food Scanner Modal */}
               {showFoodScanner && (
@@ -302,6 +387,33 @@ export default function App() {
                     <div className="mb-4">
                       <h3 className="text-lg font-light text-gray-900">Add Meal</h3>
                     </div>
+
+                    {/* AI Image Upload */}
+                    <button
+                      onClick={() => fileInputRef.current?.click()}
+                      disabled={aiLoading}
+                      className="w-full mb-4 p-4 border-2 border-dashed border-indigo-300 rounded-2xl bg-indigo-50 hover:bg-indigo-100 transition text-indigo-700 font-medium text-sm disabled:opacity-50"
+                    >
+                      {aiLoading ? (
+                        <div className="flex items-center justify-center gap-2">
+                          <Loader size={16} className="animate-spin" />
+                          Analyzing meal...
+                        </div>
+                      ) : (
+                        '📸 Upload Meal Photo for AI Analysis'
+                      )}
+                    </button>
+
+                    {aiError && (
+                      <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 text-xs">
+                        {aiError}
+                      </div>
+                    )}
+
+                    <div className="mb-4">
+                      <p className="text-xs text-gray-500 font-medium mb-3">Or choose preset:</p>
+                    </div>
+
                     <div className="space-y-3 mb-4">
                       {[
                         { name: 'Grilled Chicken & Rice', calories: 650, protein: 45 },
